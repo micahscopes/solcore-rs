@@ -1400,8 +1400,27 @@ pub(super) fn expr_reads_var(expr: &Expr<'_>, expected: &str) -> bool {
                 || expr_reads_var(then_expr, expected)
                 || expr_reads_var(else_expr, expected)
         }
+        ExprKind::Alloc { words } => expr_reads_var(words, expected),
+        ExprKind::LoadPlace { place, .. } => place_reads_var(place, expected),
         ExprKind::Word(_) | ExprKind::Bool(_) | ExprKind::Unit => false,
     }
+}
+
+fn place_reads_var(place: &PlaceExpr<'_>, expected: &str) -> bool {
+    expr_reads_var(&place.base, expected)
+        || place.projections.iter().any(|proj| match proj {
+            PlaceProj::Field { .. } | PlaceProj::Lane { .. } => false,
+            PlaceProj::Index {
+                index, bound_elems, ..
+            } => {
+                expr_reads_var(index, expected)
+                    || bound_elems
+                        .as_ref()
+                        .is_some_and(|bound| expr_reads_var(bound, expected))
+            }
+            PlaceProj::Entry { key, .. } => expr_reads_var(key, expected),
+            PlaceProj::ByteOffset { byte_offset, .. } => expr_reads_var(byte_offset, expected),
+        })
 }
 
 fn collect_leaking_let_stmts<'a, 'db>(

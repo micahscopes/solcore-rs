@@ -558,11 +558,53 @@ impl<'a, 'db> StorageLowerer<'a, 'db> {
                     },
                 }]
             }
+            StmtKind::StorePlace {
+                place,
+                value,
+                evidence,
+            } => vec![Stmt {
+                span: stmt.span,
+                kind: StmtKind::StorePlace {
+                    place: self.place(place),
+                    value: self.expr(value),
+                    evidence,
+                },
+            }],
+            StmtKind::SplitPlace {
+                binder,
+                place,
+                mode,
+            } => {
+                let place = self.place(place);
+                self.shadows.last_mut().insert(binder.as_str().to_owned());
+                vec![Stmt {
+                    span: stmt.span,
+                    kind: StmtKind::SplitPlace {
+                        binder,
+                        place,
+                        mode,
+                    },
+                }]
+            }
+            StmtKind::JoinPlace { place } => vec![Stmt {
+                span: stmt.span,
+                kind: StmtKind::JoinPlace {
+                    place: self.place(place),
+                },
+            }],
+            StmtKind::FreePlace { place } => vec![Stmt {
+                span: stmt.span,
+                kind: StmtKind::FreePlace {
+                    place: self.place(place),
+                },
+            }],
             kind @ (StmtKind::Assembly(_)
             | StmtKind::Revert(_)
             | StmtKind::Comment(_)
             | StmtKind::Break
-            | StmtKind::Continue) => vec![Stmt {
+            | StmtKind::Continue
+            | StmtKind::InitHeap
+            | StmtKind::ParamMem { .. }) => vec![Stmt {
                 span: stmt.span,
                 kind,
             }],
@@ -711,7 +753,73 @@ impl<'a, 'db> StorageLowerer<'a, 'db> {
                     else_expr: Box::new(self.expr(*else_expr)),
                 },
             },
+            ExprKind::Alloc { words } => Expr {
+                span: expr.span,
+                ty: expr.ty,
+                kind: ExprKind::Alloc {
+                    words: Box::new(self.expr(*words)),
+                },
+            },
+            ExprKind::LoadPlace { place, evidence } => Expr {
+                span: expr.span,
+                ty: expr.ty,
+                kind: ExprKind::LoadPlace {
+                    place: self.place(place),
+                    evidence,
+                },
+            },
             ExprKind::Word(_) | ExprKind::Bool(_) | ExprKind::Unit => expr,
+        }
+    }
+
+    fn place(&mut self, place: PlaceExpr<'db>) -> PlaceExpr<'db> {
+        PlaceExpr {
+            space: place.space,
+            base: Box::new(self.expr(*place.base)),
+            root_size_words: place.root_size_words,
+            projections: place
+                .projections
+                .into_iter()
+                .map(|proj| match proj {
+                    PlaceProj::Field {
+                        word_offset,
+                        field_size_words,
+                    } => PlaceProj::Field {
+                        word_offset,
+                        field_size_words,
+                    },
+                    PlaceProj::Lane {
+                        shift_bits,
+                        width_bits,
+                    } => PlaceProj::Lane {
+                        shift_bits,
+                        width_bits,
+                    },
+                    PlaceProj::Index {
+                        index,
+                        elem_size_words,
+                        bound_elems,
+                    } => PlaceProj::Index {
+                        index: Box::new(self.expr(*index)),
+                        elem_size_words,
+                        bound_elems: bound_elems.map(|b| Box::new(self.expr(*b))),
+                    },
+                    PlaceProj::Entry {
+                        key,
+                        value_size_words,
+                    } => PlaceProj::Entry {
+                        key: Box::new(self.expr(*key)),
+                        value_size_words,
+                    },
+                    PlaceProj::ByteOffset {
+                        byte_offset,
+                        size_words,
+                    } => PlaceProj::ByteOffset {
+                        byte_offset: Box::new(self.expr(*byte_offset)),
+                        size_words,
+                    },
+                })
+                .collect(),
         }
     }
 
@@ -877,11 +985,78 @@ fn replace_storage_index_read_slot<'db>(
                 then_expr: Box::new(replace_storage_index_read_slot(*then_expr, slot, slot_ref)),
                 else_expr: Box::new(replace_storage_index_read_slot(*else_expr, slot, slot_ref)),
             },
+            ExprKind::Alloc { words } => ExprKind::Alloc {
+                words: Box::new(replace_storage_index_read_slot(*words, slot, slot_ref)),
+            },
+            ExprKind::LoadPlace { place, evidence } => ExprKind::LoadPlace {
+                place: replace_storage_index_read_slot_in_place(place, slot, slot_ref),
+                evidence,
+            },
             ExprKind::Word(value) => ExprKind::Word(value),
             ExprKind::Bool(value) => ExprKind::Bool(value),
             ExprKind::Unit => ExprKind::Unit,
             ExprKind::Var(name) => ExprKind::Var(name),
         },
+    }
+}
+
+fn replace_storage_index_read_slot_in_place<'db>(
+    place: PlaceExpr<'db>,
+    slot: &Expr<'db>,
+    slot_ref: &Expr<'db>,
+) -> PlaceExpr<'db> {
+    PlaceExpr {
+        space: place.space,
+        base: Box::new(replace_storage_index_read_slot(*place.base, slot, slot_ref)),
+        root_size_words: place.root_size_words,
+        projections: place
+            .projections
+            .into_iter()
+            .map(|proj| match proj {
+                PlaceProj::Field {
+                    word_offset,
+                    field_size_words,
+                } => PlaceProj::Field {
+                    word_offset,
+                    field_size_words,
+                },
+                PlaceProj::Lane {
+                    shift_bits,
+                    width_bits,
+                } => PlaceProj::Lane {
+                    shift_bits,
+                    width_bits,
+                },
+                PlaceProj::Index {
+                    index,
+                    elem_size_words,
+                    bound_elems,
+                } => PlaceProj::Index {
+                    index: Box::new(replace_storage_index_read_slot(*index, slot, slot_ref)),
+                    elem_size_words,
+                    bound_elems: bound_elems
+                        .map(|b| Box::new(replace_storage_index_read_slot(*b, slot, slot_ref))),
+                },
+                PlaceProj::Entry {
+                    key,
+                    value_size_words,
+                } => PlaceProj::Entry {
+                    key: Box::new(replace_storage_index_read_slot(*key, slot, slot_ref)),
+                    value_size_words,
+                },
+                PlaceProj::ByteOffset {
+                    byte_offset,
+                    size_words,
+                } => PlaceProj::ByteOffset {
+                    byte_offset: Box::new(replace_storage_index_read_slot(
+                        *byte_offset,
+                        slot,
+                        slot_ref,
+                    )),
+                    size_words,
+                },
+            })
+            .collect(),
     }
 }
 

@@ -6,8 +6,8 @@ use hir::{
 };
 
 use crate::ir::{
-    Alt, Arg, CodeBlock, Con, Expr, ExprKind, Function, Object, Pat, PatKind, Program, Stmt,
-    StmtKind, Ty, TyKind,
+    Alt, Arg, BorrowMode, CodeBlock, Con, Expr, ExprKind, Function, HullEvidence, Object, Pat,
+    PatKind, PlaceExpr, PlaceProj, PlaceSpace, Program, Stmt, StmtKind, Ty, TyKind,
 };
 
 pub trait PrettyHull<'db> {
@@ -193,6 +193,66 @@ fn write_stmt<'db>(db: &'db dyn HirDb, out: &mut String, stmt: &Stmt<'db>, inden
                 &format!("/* {} */", comment.replace("*/", "* /")),
             );
         }
+        StmtKind::InitHeap => line(out, indent, "__hull_init_heap(128)"),
+        StmtKind::ParamMem { param, size_words } => {
+            line(
+                out,
+                indent,
+                &format!("__hull_param_mem({param}, {})", size_words * 32),
+            )
+        }
+        StmtKind::StorePlace {
+            place,
+            value,
+            evidence,
+        } => {
+            let ev_str = write_evidence(*evidence);
+            line(
+                out,
+                indent,
+                &format!(
+                    "__hull_store_place({}, {}, {ev_str})",
+                    write_place(place),
+                    write_expr(value)
+                ),
+            );
+        }
+        StmtKind::SplitPlace {
+            binder,
+            place,
+            mode,
+        } => {
+            let mode_str = match mode {
+                BorrowMode::Shared => "shared",
+                BorrowMode::Mutable => "mutable",
+            };
+            line(
+                out,
+                indent,
+                &format!(
+                    "{binder} := __hull_split_place({}, {mode_str}, checked)",
+                    write_place(place)
+                ),
+            );
+        }
+        StmtKind::JoinPlace { place } => {
+            line(
+                out,
+                indent,
+                &format!("__hull_join_place({})", write_expr(&place.base)),
+            );
+        }
+        StmtKind::FreePlace { place } => {
+            line(
+                out,
+                indent,
+                &format!(
+                    "__hull_free_place({}, {})",
+                    write_expr(&place.base),
+                    place.root_size_words * 32
+                ),
+            );
+        }
     }
 }
 
@@ -233,6 +293,42 @@ fn write_stmt_inline(stmt: &Stmt<'_>) -> String {
         StmtKind::Continue => "continue".to_owned(),
         StmtKind::Revert(message) => format!("revertLit \"{}\"", escape_string(message)),
         StmtKind::Comment(comment) => format!("/* {} */", comment.replace("*/", "* /")),
+        StmtKind::InitHeap => "__hull_init_heap(128)".to_owned(),
+        StmtKind::ParamMem { param, size_words } => {
+            format!("__hull_param_mem({param}, {})", size_words * 32)
+        }
+        StmtKind::StorePlace {
+            place,
+            value,
+            evidence,
+        } => {
+            let ev_str = write_evidence(*evidence);
+            format!(
+                "__hull_store_place({}, {}, {ev_str})",
+                write_place(place),
+                write_expr(value)
+            )
+        }
+        StmtKind::SplitPlace {
+            binder,
+            place,
+            mode,
+        } => {
+            let mode_str = match mode {
+                BorrowMode::Shared => "shared",
+                BorrowMode::Mutable => "mutable",
+            };
+            format!(
+                "{binder} := __hull_split_place({}, {mode_str}, checked)",
+                write_place(place)
+            )
+        }
+        StmtKind::JoinPlace { place } => format!("__hull_join_place({})", write_expr(&place.base)),
+        StmtKind::FreePlace { place } => format!(
+            "__hull_free_place({}, {})",
+            write_expr(&place.base),
+            place.root_size_words * 32
+        ),
         StmtKind::For { .. } | StmtKind::Match { .. } | StmtKind::Assembly(_) => "{}".to_owned(),
     }
 }
@@ -262,6 +358,14 @@ fn write_ty<'db>(ty: &Ty<'db>) -> String {
             let params = params.iter().map(write_ty).collect::<Vec<_>>().join(", ");
             format!("({params} -> {})", write_ty(ret))
         }
+    }
+}
+
+fn write_evidence(evidence: HullEvidence) -> &'static str {
+    match evidence {
+        HullEvidence::Checked => "checked",
+        HullEvidence::Trusted => "trusted",
+        HullEvidence::Assumed => "assumed__hull_plus",
     }
 }
 
@@ -301,7 +405,90 @@ fn write_expr<'db>(expr: &Expr<'db>) -> String {
             write_expr(then_expr),
             write_expr(else_expr)
         ),
+        ExprKind::Alloc { words } => {
+            if let ExprKind::Word(text) = &words.kind
+                && let Ok(n) = text.parse::<usize>()
+            {
+                format!("__hull_alloc({}, checked)", n * 32)
+            } else {
+                format!("__hull_alloc(shl(5, {}), checked)", write_expr(words))
+            }
+        }
+        ExprKind::LoadPlace { place, evidence } => {
+            let ev_str = write_evidence(*evidence);
+            format!("__hull_load_place({}, {ev_str})", write_place(place))
+        }
     }
+}
+
+fn write_place<'db>(place: &PlaceExpr<'db>) -> String {
+    let (root_intrinsic, unit) = match place.space {
+        PlaceSpace::Mem => ("__hull_place_mem", 32usize),
+        PlaceSpace::Pool => ("__hull_place_pool", 32usize),
+        PlaceSpace::Stor => ("__hull_place_stor", 1usize),
+        PlaceSpace::TStor => ("__hull_place_tstor", 1usize),
+    };
+    let mut cur = format!(
+        "{root_intrinsic}({}, {})",
+        write_expr(&place.base),
+        place.root_size_words * unit
+    );
+    for proj in &place.projections {
+        cur = match proj {
+            PlaceProj::Field {
+                word_offset,
+                field_size_words,
+            } => format!(
+                "__hull_field({cur}, {}, {})",
+                word_offset * unit,
+                field_size_words * unit
+            ),
+            PlaceProj::Lane {
+                shift_bits,
+                width_bits,
+            } => format!(
+                "__hull_lane({cur}, 0, {}, {})",
+                shift_bits / 8,
+                width_bits / 8
+            ),
+            PlaceProj::Index {
+                index,
+                elem_size_words,
+                bound_elems: None,
+            } => {
+                let sz = elem_size_words * unit;
+                format!("__hull_index({cur}, {}, {sz}, {sz})", write_expr(index))
+            }
+            PlaceProj::Index {
+                index,
+                elem_size_words,
+                bound_elems: Some(bound),
+            } => {
+                let sz = elem_size_words * unit;
+                format!(
+                    "__hull_index_bounded({cur}, {}, {sz}, {sz}, {})",
+                    write_expr(index),
+                    write_expr(bound)
+                )
+            }
+            PlaceProj::Entry {
+                key,
+                value_size_words,
+            } => format!(
+                "__hull_entry({cur}, {}, {value_size_words})",
+                write_expr(key)
+            ),
+            PlaceProj::ByteOffset {
+                byte_offset,
+                size_words,
+            } => format!(
+                "__hull_offset({cur}, {}, {})",
+                write_expr(byte_offset),
+                size_words * unit
+            ),
+        };
+    }
+    cur
 }
 
 fn write_pat(pat: &Pat<'_>) -> String {

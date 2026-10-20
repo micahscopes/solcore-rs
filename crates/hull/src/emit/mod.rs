@@ -30,8 +30,8 @@ use specialize::{
 
 use crate::{
     ir::{
-        Alt, Arg, CodeBlock, Con, Expr, ExprKind, Function, Object, Pat, PatKind, Program, Stmt,
-        StmtKind, Ty, TyKind,
+        Alt, Arg, CodeBlock, Con, Expr, ExprKind, Function, Object, Pat, PatKind, PlaceExpr,
+        PlaceProj, Program, Stmt, StmtKind, Ty, TyKind,
     },
     scope_stack::ScopeStack,
     word::{canonical_word_literal, wrap_word_literal},

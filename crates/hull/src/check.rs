@@ -12,8 +12,8 @@ use hir::{
 
 use crate::{
     ir::{
-        Alt, Con, Expr, ExprKind, Function, Object, Pat, PatKind, Program, Stmt, StmtKind, Ty,
-        TyKind,
+        Alt, Con, Expr, ExprKind, Function, Object, Pat, PatKind, PlaceExpr, PlaceProj, Program,
+        Stmt, StmtKind, Ty, TyKind,
     },
     scope_stack::ScopeStack,
 };
@@ -424,7 +424,67 @@ impl<'db> Env<'db> {
                     self.push(stmt.span, CheckDiagnosticKind::AssemblyRequiresDatabase);
                 }
             }
-            StmtKind::Revert(_) | StmtKind::Comment(_) => {}
+            StmtKind::Revert(_) | StmtKind::Comment(_) | StmtKind::InitHeap => {}
+            StmtKind::ParamMem { param, .. } => {
+                if let Some(ty) = self.lookup_var(param.as_str()) {
+                    let word = Ty::word(stmt.span);
+                    self.expect_type(stmt.span, &word, &ty);
+                } else {
+                    self.push(
+                        stmt.span,
+                        CheckDiagnosticKind::UndefinedVariable {
+                            name: param.as_str().to_owned(),
+                        },
+                    );
+                }
+            }
+            StmtKind::StorePlace { place, value, .. } => {
+                self.check_place(place);
+                let actual = self.check_expr(value);
+                let word = Ty::word(value.span);
+                self.expect_type(value.span, &word, &actual);
+            }
+            StmtKind::SplitPlace { binder, place, .. } => {
+                self.check_place(place);
+                if let Some(ty) = self.lookup_var(binder.as_str()) {
+                    let word = Ty::word(stmt.span);
+                    self.expect_type(stmt.span, &word, &ty);
+                } else {
+                    self.insert_var(binder.as_str().to_owned(), Ty::word(stmt.span));
+                }
+            }
+            StmtKind::JoinPlace { place } | StmtKind::FreePlace { place } => {
+                self.check_place(place);
+            }
+        }
+    }
+
+    fn check_place(&mut self, place: &PlaceExpr<'db>) {
+        let base_ty = self.check_expr(&place.base);
+        let word = Ty::word(place.base.span);
+        self.expect_type(place.base.span, &word, &base_ty);
+        for proj in &place.projections {
+            match proj {
+                PlaceProj::Field { .. } | PlaceProj::Lane { .. } => {}
+                PlaceProj::Index {
+                    index, bound_elems, ..
+                } => {
+                    let idx_ty = self.check_expr(index);
+                    self.expect_type(index.span, &word, &idx_ty);
+                    if let Some(bound) = bound_elems {
+                        let bound_ty = self.check_expr(bound);
+                        self.expect_type(bound.span, &word, &bound_ty);
+                    }
+                }
+                PlaceProj::Entry { key, .. } => {
+                    let key_ty = self.check_expr(key);
+                    self.expect_type(key.span, &word, &key_ty);
+                }
+                PlaceProj::ByteOffset { byte_offset, .. } => {
+                    let off_ty = self.check_expr(byte_offset);
+                    self.expect_type(byte_offset.span, &word, &off_ty);
+                }
+            }
         }
     }
 
@@ -608,6 +668,16 @@ impl<'db> Env<'db> {
                 self.expect_type(then_expr.span, target, &then_ty);
                 self.expect_type(else_expr.span, target, &else_ty);
                 target.clone()
+            }
+            ExprKind::Alloc { words } => {
+                let actual = self.check_expr(words);
+                let word = Ty::word(words.span);
+                self.expect_type(words.span, &word, &actual);
+                Ty::word(expr.span)
+            }
+            ExprKind::LoadPlace { place, .. } => {
+                self.check_place(place);
+                Ty::word(expr.span)
             }
         }
     }
@@ -1236,7 +1306,13 @@ fn stmt_terminates(stmt: &Stmt<'_>, db: Option<&dyn HirDb>) -> bool {
         | StmtKind::For { .. }
         | StmtKind::Break
         | StmtKind::Continue
-        | StmtKind::Comment(_) => false,
+        | StmtKind::Comment(_)
+        | StmtKind::InitHeap
+        | StmtKind::ParamMem { .. }
+        | StmtKind::StorePlace { .. }
+        | StmtKind::SplitPlace { .. }
+        | StmtKind::JoinPlace { .. }
+        | StmtKind::FreePlace { .. } => false,
     }
 }
 

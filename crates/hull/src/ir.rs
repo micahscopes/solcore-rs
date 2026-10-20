@@ -68,6 +68,117 @@ pub enum TyKind<'db> {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PlaceSpace {
+    Mem,
+    Pool,
+    Stor,
+    TStor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HullEvidence {
+    Checked,
+    Trusted,
+    Assumed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BorrowMode {
+    Shared,
+    Mutable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaceProj<'db> {
+    Field {
+        word_offset: usize,
+        field_size_words: usize,
+    },
+    Lane {
+        shift_bits: usize,
+        width_bits: usize,
+    },
+    Index {
+        index: Box<Expr<'db>>,
+        elem_size_words: usize,
+        bound_elems: Option<Box<Expr<'db>>>,
+    },
+    Entry {
+        key: Box<Expr<'db>>,
+        value_size_words: usize,
+    },
+    ByteOffset {
+        byte_offset: Box<Expr<'db>>,
+        size_words: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaceExpr<'db> {
+    pub space: PlaceSpace,
+    pub base: Box<Expr<'db>>,
+    pub root_size_words: usize,
+    pub projections: Vec<PlaceProj<'db>>,
+}
+
+impl<'db> PlaceExpr<'db> {
+    pub fn mem(base: Expr<'db>, root_size_words: usize) -> Self {
+        Self {
+            space: PlaceSpace::Mem,
+            base: Box::new(base),
+            root_size_words,
+            projections: Vec::new(),
+        }
+    }
+
+    pub fn pool(base: Expr<'db>, root_size_words: usize) -> Self {
+        Self {
+            space: PlaceSpace::Pool,
+            base: Box::new(base),
+            root_size_words,
+            projections: Vec::new(),
+        }
+    }
+
+    pub fn stor(base: Expr<'db>, root_size_words: usize) -> Self {
+        Self {
+            space: PlaceSpace::Stor,
+            base: Box::new(base),
+            root_size_words,
+            projections: Vec::new(),
+        }
+    }
+
+    pub fn tstor(base: Expr<'db>, root_size_words: usize) -> Self {
+        Self {
+            space: PlaceSpace::TStor,
+            base: Box::new(base),
+            root_size_words,
+            projections: Vec::new(),
+        }
+    }
+
+    pub fn with_proj(mut self, proj: PlaceProj<'db>) -> Self {
+        self.projections.push(proj);
+        Self { ..self }
+    }
+
+    pub fn field(self, word_offset: usize, field_size_words: usize) -> Self {
+        self.with_proj(PlaceProj::Field {
+            word_offset,
+            field_size_words,
+        })
+    }
+
+    pub fn entry(self, key: Expr<'db>, value_size_words: usize) -> Self {
+        self.with_proj(PlaceProj::Entry {
+            key: Box::new(key),
+            value_size_words,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Expr<'db> {
     pub span: Span<'db>,
@@ -107,6 +218,13 @@ pub enum ExprKind<'db> {
         then_expr: Box<Expr<'db>>,
         else_expr: Box<Expr<'db>>,
     },
+    Alloc {
+        words: Box<Expr<'db>>,
+    },
+    LoadPlace {
+        place: PlaceExpr<'db>,
+        evidence: HullEvidence,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +262,27 @@ pub enum StmtKind<'db> {
     Assembly(Vec<YulStmt<'db>>),
     Revert(String),
     Comment(String),
+    InitHeap,
+    ParamMem {
+        param: Name,
+        size_words: usize,
+    },
+    StorePlace {
+        place: PlaceExpr<'db>,
+        value: Expr<'db>,
+        evidence: HullEvidence,
+    },
+    SplitPlace {
+        binder: Name,
+        place: PlaceExpr<'db>,
+        mode: BorrowMode,
+    },
+    JoinPlace {
+        place: PlaceExpr<'db>,
+    },
+    FreePlace {
+        place: PlaceExpr<'db>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

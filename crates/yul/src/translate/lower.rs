@@ -24,6 +24,13 @@ pub fn translate_hull_program<'db>(
     db: &'db dyn HirDb,
     program: &HullProgram<'db>,
 ) -> Result<Program, TranslationError> {
+    let erased;
+    let program = if hull::has_hull_plus(program) {
+        erased = hull::erase_program(db, program);
+        &erased
+    } else {
+        program
+    };
     let mut translator = Translator::new(db);
     translator.translate_program(program)
 }
@@ -281,6 +288,14 @@ impl<'db> Translator<'db> {
             }
             StmtKind::Revert(message) => Ok(revert_stmts(message)),
             StmtKind::Comment(comment) => Ok(vec![Stmt::Comment(comment.clone())]),
+            StmtKind::InitHeap
+            | StmtKind::ParamMem { .. }
+            | StmtKind::StorePlace { .. }
+            | StmtKind::SplitPlace { .. }
+            | StmtKind::JoinPlace { .. }
+            | StmtKind::FreePlace { .. } => {
+                unreachable!("Hull+ statements are erased before Yul translation")
+            }
         }
     }
 
@@ -397,6 +412,9 @@ impl<'db> Translator<'db> {
                     default: Some(then_body),
                 });
                 Ok((out, result_loc))
+            }
+            ExprKind::Alloc { .. } | ExprKind::LoadPlace { .. } => {
+                unreachable!("Hull+ expressions are erased before Yul translation")
             }
         }
     }

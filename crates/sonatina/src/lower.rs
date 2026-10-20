@@ -51,6 +51,13 @@ pub(super) fn translate_hull_program<'db>(
     db: &'db dyn HirDb,
     program: &HullProgram<'db>,
 ) -> Result<Module, TranslationError> {
+    let erased;
+    let program = if hull::has_hull_plus(program) {
+        erased = hull::erase_program(db, program);
+        &erased
+    } else {
+        program
+    };
     Translator::new(db).translate(program)
 }
 
@@ -754,6 +761,14 @@ impl<'a, 'db> FunctionLowerer<'a, 'db> {
                 Ok(true)
             }
             StmtKind::Comment(_) => Ok(false),
+            StmtKind::InitHeap
+            | StmtKind::ParamMem { .. }
+            | StmtKind::StorePlace { .. }
+            | StmtKind::SplitPlace { .. }
+            | StmtKind::JoinPlace { .. }
+            | StmtKind::FreePlace { .. } => {
+                unreachable!("Hull+ statements are erased before Sonatina translation")
+            }
         }
     }
 
@@ -850,6 +865,9 @@ impl<'a, 'db> FunctionLowerer<'a, 'db> {
                 else_expr,
                 ..
             } => self.lower_if_expr(cond, then_expr, else_expr, &expr.ty),
+            ExprKind::Alloc { .. } | ExprKind::LoadPlace { .. } => {
+                unreachable!("Hull+ expressions are erased before Sonatina translation")
+            }
         }
     }
 

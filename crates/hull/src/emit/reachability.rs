@@ -76,6 +76,16 @@ fn collect_stmt_callees<'db>(
                 collect_yul_stmt_callees(db, stmt, out);
             }
         }
+        StmtKind::InitHeap | StmtKind::ParamMem { .. } => {}
+        StmtKind::StorePlace { place, value, .. } => {
+            collect_place_callees(place, out);
+            collect_expr_callees(value, out);
+        }
+        StmtKind::SplitPlace { place, .. }
+        | StmtKind::JoinPlace { place }
+        | StmtKind::FreePlace { place } => {
+            collect_place_callees(place, out);
+        }
     }
 }
 
@@ -105,6 +115,27 @@ fn collect_expr_callees<'db>(expr: &Expr<'db>, out: &mut BTreeSet<String>) {
             collect_expr_callees(cond, out);
             collect_expr_callees(then_expr, out);
             collect_expr_callees(else_expr, out);
+        }
+        ExprKind::Alloc { words } => collect_expr_callees(words, out),
+        ExprKind::LoadPlace { place, .. } => collect_place_callees(place, out),
+    }
+}
+
+fn collect_place_callees<'db>(place: &PlaceExpr<'db>, out: &mut BTreeSet<String>) {
+    collect_expr_callees(&place.base, out);
+    for proj in &place.projections {
+        match proj {
+            PlaceProj::Field { .. } | PlaceProj::Lane { .. } => {}
+            PlaceProj::Index {
+                index, bound_elems, ..
+            } => {
+                collect_expr_callees(index, out);
+                if let Some(bound) = bound_elems {
+                    collect_expr_callees(bound, out);
+                }
+            }
+            PlaceProj::Entry { key, .. } => collect_expr_callees(key, out),
+            PlaceProj::ByteOffset { byte_offset, .. } => collect_expr_callees(byte_offset, out),
         }
     }
 }
